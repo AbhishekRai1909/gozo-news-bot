@@ -3,37 +3,42 @@ import feedparser
 import urllib.parse
 from datetime import datetime
 
-# Page Configuration
-st.set_page_config(page_title="Gozo Mobility Intel", page_icon="🚖", layout="centered")
+st.set_page_config(page_title="Gozo Intercity Intel", page_icon="🛣️", layout="centered")
 
-# Search Keywords for Indian taxi and mobility news
-KEYWORDS = '"Gozo Cabs" OR "taxi service" OR "cab aggregator" OR "intercity cabs" OR "Uber India" OR "Ola"'
+# Highly targeted keywords for the outstation/intercity market
+INTERCITY_KEYWORDS = (
+    '"Gozo Cabs" OR "intercity cabs" OR "outstation taxi" OR '
+    '"All India Tourist Permit" OR "MoRTH aggregator" OR "GNSS toll" OR '
+    '"Uber Intercity" OR "Savaari" OR "MakeMyTrip cabs"'
+)
 
 @st.cache_data(ttl=3600)
-def get_mobility_news():
-    encoded_query = urllib.parse.quote(f"{KEYWORDS} when:24h")
+def get_intercity_news():
+    # URL encodes the query and restricts to Indian English publishers
+    encoded_query = urllib.parse.quote(f"{INTERCITY_KEYWORDS} when:7d")
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
     return feedparser.parse(rss_url).entries
 
-st.title("🚖 Gozo Cabs Market Intel")
-st.markdown("Live updates on the Indian taxi and intercity mobility ecosystem.")
+st.title("🛣️ Gozo Cabs: Intercity Market Intel")
+st.markdown("Live regulatory, infrastructure, and competitor updates for the Indian outstation market.")
 
-if st.button("🔄 Refresh News Now"):
+if st.button("🔄 Refresh Intercity News"):
     st.cache_data.clear()
 
 st.divider()
 
-articles = get_mobility_news()
+articles = get_intercity_news()
 
 if not articles:
-    st.info("No breaking news in the Indian mobility sector in the last 24 hours.")
+    st.info("No major outstation mobility news detected in the last 7 days.")
 else:
     for article in articles:
-        source_name = article.source.title if hasattr(article, 'source') else "Google News"
+        source = article.source.title if hasattr(article, 'source') else "Google News"
+        
         with st.container():
-            st.caption(f"📰 **{source_name}**")
+            st.caption(f"📰 **{source}**")
             st.subheader(article.title)
-            st.markdown(f"[Read Full Article]({article.link})")
+            st.markdown(f"[Read Full Intelligence Report]({article.link})")
             st.divider()
 
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.caption(f"Last synchronized: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
