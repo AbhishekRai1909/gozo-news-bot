@@ -1,14 +1,15 @@
 """
-Gozo Cabs — Intercity Business & Customer Intelligence Bot
-============================================================
-Tracks two distinct kinds of signal for Gozo's intercity business:
+Gozo Cabs — Intercity Business & Sales Intelligence Bot
+==========================================================
+Five lenses, ordered by how directly they drive revenue decisions:
 
-1. REGULATORY & OPS  — things that change cost, legality, or feasibility
-   (permits, fuel, EV policy, competitor moves, highway disruption)
-2. CUSTOMER INSIGHTS — things that change demand or trust
-   (events driving travel demand, corporate/campus expansion opening new
-   corridors, seasonal/tourism triggers, brand trust & safety sentiment,
-   and voice-of-customer sentiment on aggregators)
+1. DESTINATION WATCH     — news from the actual cities/corridors Gozo sells
+                           (festivals, weather, road closures, tourist rush)
+2. CORPORATE TRAVEL LEADS— businesses signalling they need a travel partner
+3. COMPETITOR INTEL      — named competitors (Savaari, Cab Bazaar, Ola,
+                           Uber, Rapido, BluSmart, InDrive)
+4. TRUST & SENTIMENT     — industry-wide safety incidents & customer sentiment
+5. REGULATORY & OPS      — cost/compliance signals (de-emphasized, own tab)
 
 Run with:  streamlit run gozo_intel_bot.py
 """
@@ -29,75 +30,68 @@ st.set_page_config(page_title="Gozo Intercity Intel", page_icon="🚕", layout="
 
 LOOKBACK_DAYS_DEFAULT = 7
 
-# Each category belongs to a GROUP ("Regulatory & Ops" or "Customer Insights"),
-# carries a display icon/signal label, and a targeted Google News query.
-# Queries are deliberately scoped with transport-context keywords so that
-# unrelated news (e.g. a celebrity's personal legal case) doesn't leak in
-# just because it shares a broad term like "case" or "arrest".
+# Destination clusters are built from Gozo's own top-cities / popular-routes
+# list (gozocabs.com) so "recent developments" actually maps to corridors
+# Gozo sells, not generic national news.
 SEARCH_QUERIES = {
-    # ---------------- REGULATORY & OPS ----------------
-    "Regulatory & Policy": {
-        "group": "Regulatory & Ops",
-        "signal": "⚖️ Risk",
-        "query": '("cab aggregator" OR "app-based taxi") AND ("MoRTH" OR "Motor Vehicle Act" '
-                 'OR "transport ministry" OR "RTO" OR "STA" OR "taxi ban" OR "licence suspended" '
-                 'OR "aggregator rules" OR "surge pricing")',
+    # ---------------- DESTINATION WATCH ----------------
+    "Destination Watch – North & Hill Circuit": {
+        "group": "Destination Watch",
+        "signal": "📍 Destination",
+        "query": '("Delhi" OR "Jaipur" OR "Gurugram" OR "Noida" OR "Chandigarh" '
+                 'OR "Haridwar" OR "Dehradun" OR "Rishikesh" OR "Shimla" OR "Manali") '
+                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
+                 'OR "tourist rush" OR "wedding season" OR "road closed" OR "VIP movement")',
     },
-    "Intercity Permits & Highways": {
-        "group": "Regulatory & Ops",
-        "signal": "🛣️ Ops",
-        "query": '("All India Tourist Permit" OR "AITP" OR "commercial vehicle fitness" '
-                 'OR "interstate permit" OR "national highway" OR "NHAI" OR "expressway opening" '
-                 'OR "toll hike" OR "FASTag")',
+    "Destination Watch – West & Goa Circuit": {
+        "group": "Destination Watch",
+        "signal": "📍 Destination",
+        "query": '("Mumbai" OR "Pune" OR "Nashik" OR "Pimpri-Chinchwad" OR "Goa") '
+                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
+                 'OR "tourist rush" OR "monsoon" OR "road closed")',
     },
-    "Fuel & Operating Costs": {
-        "group": "Regulatory & Ops",
-        "signal": "⛽ Cost",
-        "query": '("petrol price" OR "diesel price" OR "CNG price" OR "fuel price hike" '
-                 'OR "LPG price") AND (India)',
+    "Destination Watch – South Metros": {
+        "group": "Destination Watch",
+        "signal": "📍 Destination",
+        "query": '("Bengaluru" OR "Chennai" OR "Hyderabad" OR "Mysuru") '
+                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
+                 'OR "tourist rush" OR "road closed")',
     },
-    "EV & Green Mobility Policy": {
-        "group": "Regulatory & Ops",
-        "signal": "🔋 Policy",
-        "query": '("EV policy" OR "electric vehicle subsidy" OR "FAME scheme" '
-                 'OR "electric taxi" OR "EV fleet") AND (India OR state)',
-    },
-    "Competitor Moves": {
-        "group": "Regulatory & Ops",
-        "signal": "🎯 Competitive",
-        "query": '("Ola" OR "Uber" OR "InDrive" OR "BluSmart" OR "Rapido") AND '
-                 '("intercity" OR "outstation" OR "funding" OR "expansion" OR "layoffs" OR "fare hike")',
-    },
-    "Travel Disruption & Delays": {
-        "group": "Regulatory & Ops",
-        "signal": "🚧 Disruption",
-        "query": '("highway closure" OR "landslide" OR "flood alert" OR "road blocked" '
-                 'OR "train cancelled" OR "flight cancelled" OR "transport strike" OR "bandh") AND India',
+    "Destination Watch – Central India": {
+        "group": "Destination Watch",
+        "signal": "📍 Destination",
+        "query": '("Bhopal" OR "Indore") AND '
+                 '("festival" OR "traffic advisory" OR "highway" OR "weather alert" OR "road closed")',
     },
 
-    # ---------------- CUSTOMER INSIGHTS ----------------
-    "Demand Triggers – Events": {
-        "group": "Customer Insights",
-        "signal": "📈 Demand",
-        "query": '("IPL match" OR "cricket match" OR "concert" OR "music festival" '
-                 'OR "election rally" OR "trade expo" OR "conference") AND India '
-                 'AND (tickets OR crowd OR venue OR travel)',
+    # ---------------- CORPORATE TRAVEL LEADS ----------------
+    "Corporate Travel RFPs & Leads": {
+        "group": "Corporate Travel Leads",
+        "signal": "💼 Lead",
+        "query": '("travel management company" OR "corporate travel partner" '
+                 'OR "ground transportation partner" OR "employee transportation solution" '
+                 'OR "pan-India travel partner" OR "travel management partner") AND India '
+                 'AND (appoints OR empanelment OR partners OR onboards OR selects OR tender)',
     },
-    "Corporate & Campus Expansion": {
-        "group": "Customer Insights",
-        "signal": "🏢 Demand",
-        "query": '("signs MoU" OR "new campus" OR "industrial park" OR "IT park" '
-                 'OR "semiconductor" OR "office opens" OR "SEZ" OR "manufacturing plant") '
-                 'AND India AND (jobs OR investment OR employees)',
+
+    # ---------------- COMPETITOR INTEL ----------------
+    "Competitor – Savaari & Cab Bazaar": {
+        "group": "Competitor Intel",
+        "signal": "🎯 Competitor",
+        "query": '(("Savaari" AND ("cab" OR "car rental" OR "outstation" OR "taxi")) '
+                 'OR "Cab Bazaar" OR "CabBazaar")',
     },
-    "Tourism & Seasonal Demand": {
-        "group": "Customer Insights",
-        "signal": "🎉 Demand",
-        "query": '("tourist season" OR "wedding season" OR "pilgrimage" OR "festival rush" '
-                 'OR "Kumbh" OR "Diwali travel" OR "Holi travel" OR "holiday rush") AND India',
+    "Competitor – Major Aggregators": {
+        "group": "Competitor Intel",
+        "signal": "🎯 Competitor",
+        "query": '("Ola" OR "Uber" OR "InDrive" OR "BluSmart" OR "Rapido") AND '
+                 '("intercity" OR "outstation" OR "funding" OR "expansion" OR "layoffs" OR "fare hike" '
+                 'OR "new feature" OR "partnership")',
     },
+
+    # ---------------- TRUST & SENTIMENT ----------------
     "Brand Trust & Safety Sentiment": {
-        "group": "Customer Insights",
+        "group": "Trust & Sentiment",
         "signal": "🛡️ Trust",
         "query": '("cab driver" OR "taxi driver" OR "app-based cab" OR "ride-hailing driver" '
                  'OR "aggregator driver" OR "cab passenger") AND '
@@ -105,25 +99,55 @@ SEARCH_QUERIES = {
                  'OR "misconduct" OR "overcharging" OR "refused ride")',
     },
     "Aggregator Customer Sentiment": {
-        "group": "Customer Insights",
+        "group": "Trust & Sentiment",
         "signal": "💬 Sentiment",
-        "query": '("Ola" OR "Uber" OR "Rapido" OR "cab service" OR "ride hailing") AND '
+        "query": '("Ola" OR "Uber" OR "Rapido" OR "Savaari" OR "cab service" OR "ride hailing") AND '
                  '("customer complaint" OR "surge pricing anger" OR "customer service" '
                  'OR "cancellation fee" OR "consumer forum" OR "viral video")',
     },
+
+    # ---------------- REGULATORY & OPS (de-emphasized) ----------------
+    "Regulatory & Policy": {
+        "group": "Regulatory & Ops",
+        "signal": "⚖️ Risk",
+        "query": '("cab aggregator" OR "app-based taxi") AND ("MoRTH" OR "Motor Vehicle Act" '
+                 'OR "transport ministry" OR "RTO" OR "STA" OR "taxi ban" OR "licence suspended" '
+                 'OR "aggregator rules" OR "surge pricing")',
+    },
+    "Highways & Travel Disruption": {
+        "group": "Regulatory & Ops",
+        "signal": "🚧 Ops",
+        "query": '("national highway" OR "NHAI" OR "expressway" OR "toll hike" OR "FASTag" '
+                 'OR "highway closure" OR "landslide" OR "flood alert" OR "road blocked" '
+                 'OR "train cancelled" OR "flight cancelled" OR "transport strike" OR "bandh") AND India',
+    },
+    "Costs & Fleet Policy": {
+        "group": "Regulatory & Ops",
+        "signal": "⛽ Cost",
+        "query": '("petrol price" OR "diesel price" OR "CNG price" OR "fuel price hike" '
+                 'OR "LPG price" OR "EV policy" OR "electric vehicle subsidy" OR "FAME scheme" '
+                 'OR "electric taxi" OR "EV fleet") AND India',
+    },
 }
 
-GROUPS = ["Regulatory & Ops", "Customer Insights"]
+GROUPS = [
+    "Destination Watch",
+    "Corporate Travel Leads",
+    "Competitor Intel",
+    "Trust & Sentiment",
+    "Regulatory & Ops",
+]
 
 HIGH_IMPACT_KEYWORDS = [
     "ban", "banned", "suspended", "suspension", "strike", "shutdown", "halt",
     "court order", "supreme court", "high court", "penalty", "fine imposed",
     "licence cancelled", "license cancelled", "seized", "protest", "assault",
-    "harassment", "molestation",
+    "harassment", "molestation", "funding", "appoints", "empanelment", "tender",
 ]
 MEDIUM_IMPACT_KEYWORDS = [
     "hike", "increase", "new rule", "guideline", "notification", "draft policy",
     "subsidy", "scheme launched", "toll", "fare revision", "complaint",
+    "festival", "tourist rush", "wedding season", "traffic advisory",
 ]
 
 
@@ -197,6 +221,9 @@ def get_all_news(lookback_days: int = LOOKBACK_DAYS_DEFAULT):
 
 
 def render_article_list(article_list):
+    if not article_list:
+        st.info("No articles match the current filters.")
+        return
     for a in article_list:
         impact_color = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}[a["impact"]]
         date_str = a["published_dt"].strftime("%d %b %Y, %H:%M") if a["published_dt"] else "Date unknown"
@@ -214,10 +241,10 @@ def render_article_list(article_list):
 # UI
 # ----------------------------------------------------------------------------
 
-st.title("🚕 Gozo Cabs: Intercity Business & Customer Intelligence")
+st.title("🚕 Gozo Cabs: Intercity Business & Sales Intelligence")
 st.markdown(
-    "Two lenses on the same feed: **Regulatory & Ops** (cost, legality, feasibility) and "
-    "**Customer Insights** (demand triggers and brand trust signals)."
+    "Built around what moves the business: **where people are actually traveling**, "
+    "**who's shopping for a travel partner**, and **what Savaari, Cab Bazaar & the aggregators are doing**."
 )
 
 with st.sidebar:
@@ -241,9 +268,18 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+    st.divider()
+    with st.expander("ℹ️ About the Corporate Leads tab"):
+        st.caption(
+            "Google News rarely covers private RFP/tender activity for travel management "
+            "vendors — that mostly lives on government tender portals (GeM), LinkedIn, and "
+            "trade press (ET TravelWorld, TravelBizMonitor). This tab catches published "
+            "'appoints/onboards' announcements, but treat a thin result as expected, not broken."
+        )
+
 st.divider()
 
-with st.spinner("Fetching latest regulatory, market, and customer signal news..."):
+with st.spinner("Fetching destination, lead, and competitor signals..."):
     articles, fetch_errors = get_all_news(lookback_days)
 
 if fetch_errors:
@@ -259,35 +295,36 @@ filtered = [
     and (keyword_filter.lower() in (a["title"] + a["summary"]).lower() if keyword_filter else True)
 ]
 
-demand_signals = [a for a in filtered if a["group"] == "Customer Insights" and "Demand" in a["signal"]]
-trust_signals = [a for a in filtered if a["signal"] == "🛡️ Trust"]
+destination_signals = [a for a in filtered if a["group"] == "Destination Watch"]
+lead_signals = [a for a in filtered if a["group"] == "Corporate Travel Leads"]
+competitor_signals = [a for a in filtered if a["group"] == "Competitor Intel"]
+trust_signals = [a for a in filtered if a["group"] == "Trust & Sentiment"]
 regulatory_signals = [a for a in filtered if a["group"] == "Regulatory & Ops"]
 
 # --- Top metrics ---
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-col_m1.metric("Total articles", len(filtered))
-col_m2.metric("📈 Demand signals", len(demand_signals))
-col_m3.metric("🛡️ Trust/safety signals", len(trust_signals))
-col_m4.metric("🔴 High impact", sum(1 for a in filtered if a["impact"] == "High"))
+col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+col_m1.metric("📍 Destination", len(destination_signals))
+col_m2.metric("💼 Leads", len(lead_signals))
+col_m3.metric("🎯 Competitor", len(competitor_signals))
+col_m4.metric("🛡️ Trust/Sentiment", len(trust_signals))
+col_m5.metric("🔴 High impact", sum(1 for a in filtered if a["impact"] == "High"))
 
 st.divider()
 
-tab_overview, tab_customer, tab_regulatory, tab_all = st.tabs(
-    ["🔎 Overview", "👥 Customer Insights", "🏛️ Regulatory & Ops", "📋 All News"]
+tab_overview, tab_dest, tab_leads, tab_comp, tab_trust, tab_ops = st.tabs(
+    ["🔎 Overview", "📍 Destination Watch", "💼 Corporate Leads",
+     "🎯 Competitor Intel", "🛡️ Trust & Sentiment", "🏛️ Regulatory & Ops"]
 )
 
 with tab_overview:
-    st.subheader("Top demand signals")
-    if demand_signals:
-        render_article_list(demand_signals[:3])
-    else:
-        st.info("No demand-trigger news in the current window/filters.")
+    st.subheader("💼 Fresh leads")
+    render_article_list(lead_signals[:5])
 
-    st.subheader("Top trust & safety signals")
-    if trust_signals:
-        render_article_list(trust_signals[:3])
-    else:
-        st.info("No brand trust/safety news in the current window/filters.")
+    st.subheader("🎯 Competitor moves")
+    render_article_list(competitor_signals[:5])
+
+    st.subheader("📍 Destination signals")
+    render_article_list(destination_signals[:5])
 
     st.subheader("📊 Signal mix")
     if filtered:
@@ -299,24 +336,20 @@ with tab_overview:
         )
         st.dataframe(df_counts, hide_index=True, use_container_width=True)
 
-with tab_customer:
-    customer_articles = [a for a in filtered if a["group"] == "Customer Insights"]
-    if customer_articles:
-        render_article_list(customer_articles)
-    else:
-        st.info("No customer-insight articles match the current filters.")
+with tab_dest:
+    render_article_list(destination_signals)
 
-with tab_regulatory:
-    if regulatory_signals:
-        render_article_list(regulatory_signals)
-    else:
-        st.info("No regulatory/ops articles match the current filters.")
+with tab_leads:
+    render_article_list(lead_signals)
 
-with tab_all:
-    if filtered:
-        render_article_list(filtered)
-    else:
-        st.info("No articles match the current filters.")
+with tab_comp:
+    render_article_list(competitor_signals)
+
+with tab_trust:
+    render_article_list(trust_signals)
+
+with tab_ops:
+    render_article_list(regulatory_signals)
 
     if filtered:
         export_df = pd.DataFrame(filtered)[
@@ -324,7 +357,7 @@ with tab_all:
         ]
         csv = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "📥 Download filtered results as CSV",
+            "📥 Download all filtered results as CSV",
             data=csv,
             file_name=f"gozo_intel_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
