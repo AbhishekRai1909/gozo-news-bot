@@ -1,367 +1,315 @@
 """
-Gozo Cabs — Intercity Business & Sales Intelligence Bot
-==========================================================
-Five lenses, ordered by how directly they drive revenue decisions:
+Gozo Cabs — Location Activity Calendar
+=========================================
+One job: tell the team, for each cluster of Gozo's destinations, whether it's
+ACTIVE NOW, UPCOMING (with a countdown), or QUIET — based on the real demand
+calendar (festivals, pilgrimage seasons, wedding season, tourist peaks).
 
-1. DESTINATION WATCH     — news from the actual cities/corridors Gozo sells
-                           (festivals, weather, road closures, tourist rush)
-2. CORPORATE TRAVEL LEADS— businesses signalling they need a travel partner
-3. COMPETITOR INTEL      — named competitors (Savaari, Cab Bazaar, Ola,
-                           Uber, Rapido, BluSmart, InDrive)
-4. TRUST & SENTIMENT     — industry-wide safety incidents & customer sentiment
-5. REGULATORY & OPS      — cost/compliance signals (de-emphasized, own tab)
+Event dates below were verified against multiple sources in September 2026
+(Hindu-calendar festivals shift every year, so don't trust memorized dates —
+re-verify before reusing this file past ~March 2027, or whenever the curated
+window runs out).
 
-Run with:  streamlit run gozo_intel_bot.py
+Run with:  streamlit run gozo_location_calendar.py
 """
 
-import time
-import urllib.parse
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
-import feedparser
-import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ----------------------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------------------
 
-st.set_page_config(page_title="Gozo Intercity Intel", page_icon="🚕", layout="wide")
+st.set_page_config(page_title="Gozo Location Activity Calendar", page_icon="📅", layout="wide")
 
-LOOKBACK_DAYS_DEFAULT = 7
-
-# Destination clusters are built from Gozo's own top-cities / popular-routes
-# list (gozocabs.com) so "recent developments" actually maps to corridors
-# Gozo sells, not generic national news.
-SEARCH_QUERIES = {
-    # ---------------- DESTINATION WATCH ----------------
-    "Destination Watch – North & Hill Circuit": {
-        "group": "Destination Watch",
-        "signal": "📍 Destination",
-        "query": '("Delhi" OR "Jaipur" OR "Gurugram" OR "Noida" OR "Chandigarh" '
-                 'OR "Haridwar" OR "Dehradun" OR "Rishikesh" OR "Shimla" OR "Manali") '
-                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
-                 'OR "tourist rush" OR "wedding season" OR "road closed" OR "VIP movement")',
-    },
-    "Destination Watch – West & Goa Circuit": {
-        "group": "Destination Watch",
-        "signal": "📍 Destination",
-        "query": '("Mumbai" OR "Pune" OR "Nashik" OR "Pimpri-Chinchwad" OR "Goa") '
-                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
-                 'OR "tourist rush" OR "monsoon" OR "road closed")',
-    },
-    "Destination Watch – South Metros": {
-        "group": "Destination Watch",
-        "signal": "📍 Destination",
-        "query": '("Bengaluru" OR "Chennai" OR "Hyderabad" OR "Mysuru") '
-                 'AND ("festival" OR "traffic advisory" OR "highway" OR "weather alert" '
-                 'OR "tourist rush" OR "road closed")',
-    },
-    "Destination Watch – Central India": {
-        "group": "Destination Watch",
-        "signal": "📍 Destination",
-        "query": '("Bhopal" OR "Indore") AND '
-                 '("festival" OR "traffic advisory" OR "highway" OR "weather alert" OR "road closed")',
-    },
-
-    # ---------------- CORPORATE TRAVEL LEADS ----------------
-    "Corporate Travel RFPs & Leads": {
-        "group": "Corporate Travel Leads",
-        "signal": "💼 Lead",
-        "query": '("travel management company" OR "corporate travel partner" '
-                 'OR "ground transportation partner" OR "employee transportation solution" '
-                 'OR "pan-India travel partner" OR "travel management partner") AND India '
-                 'AND (appoints OR empanelment OR partners OR onboards OR selects OR tender)',
-    },
-
-    # ---------------- COMPETITOR INTEL ----------------
-    "Competitor – Savaari & Cab Bazaar": {
-        "group": "Competitor Intel",
-        "signal": "🎯 Competitor",
-        "query": '(("Savaari" AND ("cab" OR "car rental" OR "outstation" OR "taxi")) '
-                 'OR "Cab Bazaar" OR "CabBazaar")',
-    },
-    "Competitor – Major Aggregators": {
-        "group": "Competitor Intel",
-        "signal": "🎯 Competitor",
-        "query": '("Ola" OR "Uber" OR "InDrive" OR "BluSmart" OR "Rapido") AND '
-                 '("intercity" OR "outstation" OR "funding" OR "expansion" OR "layoffs" OR "fare hike" '
-                 'OR "new feature" OR "partnership")',
-    },
-
-    # ---------------- TRUST & SENTIMENT ----------------
-    "Brand Trust & Safety Sentiment": {
-        "group": "Trust & Sentiment",
-        "signal": "🛡️ Trust",
-        "query": '("cab driver" OR "taxi driver" OR "app-based cab" OR "ride-hailing driver" '
-                 'OR "aggregator driver" OR "cab passenger") AND '
-                 '("assault" OR "harassment" OR "molestation" OR "safety complaint" '
-                 'OR "misconduct" OR "overcharging" OR "refused ride")',
-    },
-    "Aggregator Customer Sentiment": {
-        "group": "Trust & Sentiment",
-        "signal": "💬 Sentiment",
-        "query": '("Ola" OR "Uber" OR "Rapido" OR "Savaari" OR "cab service" OR "ride hailing") AND '
-                 '("customer complaint" OR "surge pricing anger" OR "customer service" '
-                 'OR "cancellation fee" OR "consumer forum" OR "viral video")',
-    },
-
-    # ---------------- REGULATORY & OPS (de-emphasized) ----------------
-    "Regulatory & Policy": {
-        "group": "Regulatory & Ops",
-        "signal": "⚖️ Risk",
-        "query": '("cab aggregator" OR "app-based taxi") AND ("MoRTH" OR "Motor Vehicle Act" '
-                 'OR "transport ministry" OR "RTO" OR "STA" OR "taxi ban" OR "licence suspended" '
-                 'OR "aggregator rules" OR "surge pricing")',
-    },
-    "Highways & Travel Disruption": {
-        "group": "Regulatory & Ops",
-        "signal": "🚧 Ops",
-        "query": '("national highway" OR "NHAI" OR "expressway" OR "toll hike" OR "FASTag" '
-                 'OR "highway closure" OR "landslide" OR "flood alert" OR "road blocked" '
-                 'OR "train cancelled" OR "flight cancelled" OR "transport strike" OR "bandh") AND India',
-    },
-    "Costs & Fleet Policy": {
-        "group": "Regulatory & Ops",
-        "signal": "⛽ Cost",
-        "query": '("petrol price" OR "diesel price" OR "CNG price" OR "fuel price hike" '
-                 'OR "LPG price" OR "EV policy" OR "electric vehicle subsidy" OR "FAME scheme" '
-                 'OR "electric taxi" OR "EV fleet") AND India',
-    },
-}
-
-GROUPS = [
-    "Destination Watch",
-    "Corporate Travel Leads",
-    "Competitor Intel",
-    "Trust & Sentiment",
-    "Regulatory & Ops",
+DESTINATION_GROUPS = [
+    "All-India",
+    "North & Hill Circuit",   # Delhi, Jaipur, Gurugram, Noida, Chandigarh, Haridwar, Dehradun, Rishikesh, Shimla, Manali
+    "West & Goa",             # Mumbai, Pune, Nashik, Pimpri-Chinchwad, Goa
+    "South Metros",           # Bengaluru, Chennai, Hyderabad, Mysuru
+    "Central India",          # Bhopal, Indore
 ]
 
-HIGH_IMPACT_KEYWORDS = [
-    "ban", "banned", "suspended", "suspension", "strike", "shutdown", "halt",
-    "court order", "supreme court", "high court", "penalty", "fine imposed",
-    "licence cancelled", "license cancelled", "seized", "protest", "assault",
-    "harassment", "molestation", "funding", "appoints", "empanelment", "tender",
+# Curated demand calendar. Dates verified Sept 2026 against SmartPuja's 2026
+# Hindu festival calendar and multiple panchang sources. Where an exact date
+# isn't fixed by a national calendar (e.g. temple-committee decisions),
+# "verified" is False and a re-check note is included.
+EVENTS = [
+    {
+        "name": "Mysuru Dasara",
+        "group": "South Metros",
+        "start": date(2026, 10, 11),
+        "end": date(2026, 10, 20),
+        "why": "Mysuru's flagship 10-day festival culminating on Vijayadashami. Expect a major "
+               "tourist surge into Mysuru, with strong outstation demand from Bengaluru.",
+        "verified": True,
+    },
+    {
+        "name": "Sharad Navratri & Durga Puja",
+        "group": "All-India",
+        "start": date(2026, 10, 11),
+        "end": date(2026, 10, 19),
+        "why": "Nine nights of Garba/Durga Puja pandal-hopping. Mostly short-hop city travel; "
+               "lighter intercity effect than Dussehra or Diwali, but worth tracking in Delhi/NCR.",
+        "verified": True,
+    },
+    {
+        "name": "Dussehra (Vijayadashami)",
+        "group": "North & Hill Circuit",
+        "start": date(2026, 10, 17),
+        "end": date(2026, 10, 20),
+        "why": "Delhi's Ramlila Maidan events draw large crowds in the run-up to Oct 20. "
+               "Watch for NCR traffic advisories and short-trip demand spikes.",
+        "verified": True,
+    },
+    {
+        "name": "Char Dham Yatra — season closing",
+        "group": "North & Hill Circuit",
+        "start": date(2026, 10, 25),
+        "end": date(2026, 11, 10),
+        "why": "Kedarnath/Badrinath/Gangotri/Yamunotri typically close for winter around "
+               "Bhai Dooj. Expect a last-minute pilgrim surge on the Haridwar–Rishikesh–"
+               "Dehradun corridor before the shutdown.",
+        "verified": False,  # exact closing dates are set by temple committees — re-check closer to the date
+    },
+    {
+        "name": "Diwali (Dhanteras → Bhai Dooj)",
+        "group": "All-India",
+        "start": date(2026, 11, 6),
+        "end": date(2026, 11, 10),
+        "why": "The single heaviest outstation travel window of the year — main day (Lakshmi "
+               "Puja) is Nov 8. Nationwide homecoming travel drives a surge in one-way "
+               "outstation bookings across every corridor.",
+        "verified": True,
+    },
+    {
+        "name": "Chhath Puja (Delhi/Mumbai → Bihar/UP outbound)",
+        "group": "North & Hill Circuit",
+        "start": date(2026, 11, 14),
+        "end": date(2026, 11, 16),
+        "why": "Major homecoming travel from Delhi/Mumbai to Bihar/UP/Jharkhand. Not a Gozo "
+               "'top city' destination, but the outbound demand originates in Delhi/NCR — "
+               "a real one-way booking opportunity even though the drop city isn't in the "
+               "usual route list.",
+        "verified": True,
+    },
+    {
+        "name": "Winter Wedding Season",
+        "group": "North & Hill Circuit",
+        "start": date(2026, 11, 21),
+        "end": date(2027, 2, 15),
+        "why": "Peak destination-wedding season, especially Jaipur/Rajasthan. Expect sustained "
+               "multi-day chauffeur bookings rather than one-off point-to-point trips.",
+        "verified": True,
+    },
+    {
+        "name": "Goa Peak Season",
+        "group": "West & Goa",
+        "start": date(2026, 12, 15),
+        "end": date(2027, 1, 15),
+        "why": "Goa's high-tourist-density window. Airport transfer and multi-day rental demand "
+               "both spike.",
+        "verified": True,
+    },
+    {
+        "name": "Christmas & New Year Long Weekend",
+        "group": "All-India",
+        "start": date(2026, 12, 24),
+        "end": date(2027, 1, 1),
+        "why": "Nationwide leisure travel spike — hill stations (Shimla/Manali) for snow "
+               "tourism, plus general long-weekend outstation bookings.",
+        "verified": True,
+    },
+    {
+        "name": "Makar Sankranti / Lohri / Pongal",
+        "group": "All-India",
+        "start": date(2027, 1, 13),
+        "end": date(2027, 1, 15),
+        "why": "Regional harvest festivals with strong homecoming travel: Lohri (Punjab/"
+               "Chandigarh), Pongal (Chennai/South), Sankranti (Central India/Maharashtra).",
+        "verified": True,
+    },
+    {
+        "name": "Republic Day Long Weekend",
+        "group": "All-India",
+        "start": date(2027, 1, 24),
+        "end": date(2027, 1, 26),
+        "why": "A predictable long-weekend leisure bump, especially on hill-station and "
+               "heritage-city routes.",
+        "verified": True,
+    },
 ]
-MEDIUM_IMPACT_KEYWORDS = [
-    "hike", "increase", "new rule", "guideline", "notification", "draft policy",
-    "subsidy", "scheme launched", "toll", "fare revision", "complaint",
-    "festival", "tourist rush", "wedding season", "traffic advisory",
-]
+
+CURATED_THROUGH = max(e["end"] for e in EVENTS)
 
 
 # ----------------------------------------------------------------------------
-# DATA FETCHING
+# STATUS LOGIC
 # ----------------------------------------------------------------------------
 
-def build_rss_url(query: str, lookback_days: int) -> str:
-    encoded_query = urllib.parse.quote_plus(f"{query} when:{lookback_days}d")
-    return f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
+def get_status(event, today):
+    if event["start"] <= today <= event["end"]:
+        days_left = (event["end"] - today).days
+        return "active", days_left
+    elif event["start"] > today:
+        days_until = (event["start"] - today).days
+        return "upcoming", days_until
+    else:
+        return "past", None
 
 
-def score_impact(title: str, summary: str) -> str:
-    text = f"{title} {summary}".lower()
-    if any(kw in text for kw in HIGH_IMPACT_KEYWORDS):
-        return "High"
-    if any(kw in text for kw in MEDIUM_IMPACT_KEYWORDS):
-        return "Medium"
-    return "Low"
+def status_badge(status, value):
+    if status == "active":
+        return f"🟢 ACTIVE NOW · {value} day{'s' if value != 1 else ''} left"
+    elif status == "upcoming":
+        return f"🟡 UPCOMING · in {value} day{'s' if value != 1 else ''}"
+    else:
+        return "⚪ PASSED"
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_all_news(lookback_days: int = LOOKBACK_DAYS_DEFAULT):
-    all_articles = []
-    seen_links = set()
-    fetch_errors = []
+# ----------------------------------------------------------------------------
+# TIMELINE (custom HTML/CSS Gantt — no extra chart library needed)
+# ----------------------------------------------------------------------------
 
-    for category, cfg in SEARCH_QUERIES.items():
-        rss_url = build_rss_url(cfg["query"], lookback_days)
-        try:
-            feed = feedparser.parse(rss_url)
-        except Exception as e:
-            fetch_errors.append(f"{category}: request failed ({e})")
-            continue
+def build_timeline_html(events, today, window_days):
+    window_end = today + timedelta(days=window_days)
+    row_h = 46
+    header_h = 34
+    total_h = header_h + row_h * len(events) + 10
 
-        if getattr(feed, "bozo", False) and not feed.entries:
-            fetch_errors.append(f"{category}: feed parse issue, 0 entries returned")
-            continue
+    # Month gridlines
+    month_marks = []
+    cursor = date(today.year, today.month, 1)
+    while cursor <= window_end:
+        offset = (cursor - today).days
+        if 0 <= offset <= window_days:
+            left_pct = offset / window_days * 100
+            month_marks.append((left_pct, cursor.strftime("%b %Y")))
+        if cursor.month == 12:
+            cursor = date(cursor.year + 1, 1, 1)
+        else:
+            cursor = date(cursor.year, cursor.month + 1, 1)
 
-        if not feed.entries:
-            fetch_errors.append(f"{category}: 0 articles found in lookback window")
+    gridlines_html = "".join(
+        f'<div style="position:absolute;left:{pct:.2f}%;top:0;bottom:0;'
+        f'border-left:1px solid #333;font-size:11px;color:#888;padding-left:4px;">{label}</div>'
+        for pct, label in month_marks
+    )
 
-        for entry in feed.entries:
-            link = getattr(entry, "link", None)
-            if not link or link in seen_links:
-                continue
-            seen_links.add(link)
+    today_line = (
+        '<div style="position:absolute;left:0%;top:0;bottom:0;'
+        'border-left:2px solid #e74c3c;z-index:5;"></div>'
+        '<div style="position:absolute;left:0%;top:-2px;font-size:11px;'
+        'color:#e74c3c;font-weight:bold;">TODAY</div>'
+    )
 
-            title = getattr(entry, "title", "Untitled")
-            summary = getattr(entry, "summary", "")
-            source = entry.source.title if hasattr(entry, "source") else "Google News"
-            published_struct = entry.get("published_parsed")
-            published_dt = datetime(*published_struct[:6]) if published_struct else None
+    color_map = {"active": "#2ecc71", "upcoming": "#f1c40f", "past": "#555555"}
 
-            all_articles.append({
-                "title": title,
-                "link": link,
-                "source": source,
-                "category": category,
-                "group": cfg["group"],
-                "signal": cfg["signal"],
-                "published_dt": published_dt,
-                "impact": score_impact(title, summary),
-                "summary": summary,
-            })
+    rows_html = ""
+    for i, ev in enumerate(events):
+        status, _ = get_status(ev, today)
+        clamped_start = max(ev["start"], today)
+        left_offset = max(0, (clamped_start - today).days)
+        raw_width = (ev["end"] - clamped_start).days + 1
+        left_pct = min(100, left_offset / window_days * 100)
+        width_pct = max(0.5, min(100 - left_pct, raw_width / window_days * 100))
+        color = color_map[status]
+        top = header_h + i * row_h + 6
+        tooltip = f"{ev['name']} ({ev['start'].strftime('%d %b')} – {ev['end'].strftime('%d %b')})"
 
-        time.sleep(1)  # be polite to Google News
+        rows_html += (
+            f'<div style="position:absolute;left:0;top:{top}px;font-size:12px;color:#ddd;'
+            f'width:100%;overflow:hidden;white-space:nowrap;">{ev["name"]}</div>'
+            f'<div title="{tooltip}" style="position:absolute;left:{left_pct:.2f}%;top:{top + 16}px;'
+            f'width:{width_pct:.2f}%;height:14px;background:{color};border-radius:4px;"></div>'
+        )
 
-    all_articles.sort(key=lambda a: a["published_dt"] or datetime(1970, 1, 1), reverse=True)
-    return all_articles, fetch_errors
-
-
-def render_article_list(article_list):
-    if not article_list:
-        st.info("No articles match the current filters.")
-        return
-    for a in article_list:
-        impact_color = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}[a["impact"]]
-        date_str = a["published_dt"].strftime("%d %b %Y, %H:%M") if a["published_dt"] else "Date unknown"
-        with st.container():
-            st.caption(
-                f"📰 **{a['source']}** | 🏷️ {a['category']} | {a['signal']} | "
-                f"{impact_color} {a['impact']} | 🕒 {date_str}"
-            )
-            st.subheader(a["title"])
-            st.markdown(f"[Read Full Report]({a['link']})")
-            st.divider()
+    html = f"""
+    <div style="position:relative;width:100%;height:{total_h}px;
+                background:#1a1a1a;border-radius:8px;padding:10px 12px;
+                font-family:sans-serif;overflow:hidden;">
+        <div style="position:relative;height:{header_h}px;">{gridlines_html}</div>
+        <div style="position:relative;height:{total_h - header_h}px;">
+            {today_line}
+            {rows_html}
+        </div>
+    </div>
+    """
+    return html, total_h + 20
 
 
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
 
-st.title("🚕 Gozo Cabs: Intercity Business & Sales Intelligence")
-st.markdown(
-    "Built around what moves the business: **where people are actually traveling**, "
-    "**who's shopping for a travel partner**, and **what Savaari, Cab Bazaar & the aggregators are doing**."
-)
+st.title("📅 Gozo Cabs: Location Activity Calendar")
+st.markdown("When each destination cluster is active, or about to be — for route planning and fleet allocation.")
+
+today = date.today()
 
 with st.sidebar:
     st.header("⚙️ Filters")
-    lookback_days = st.slider("Lookback window (days)", 1, 30, LOOKBACK_DAYS_DEFAULT)
+    window_days = st.slider("Timeline window (days ahead)", 60, 180, 150, step=15)
+    group_filter = st.multiselect("Destination groups", options=DESTINATION_GROUPS, default=DESTINATION_GROUPS)
+    st.divider()
+    st.caption(f"Today: {today.strftime('%d %b %Y')}")
+    st.caption(f"Calendar curated through: {CURATED_THROUGH.strftime('%d %b %Y')}")
+    if today > CURATED_THROUGH:
+        st.warning("Today is past the curated window — this file needs a fresh set of dates.")
+    unverified = [e["name"] for e in EVENTS if not e["verified"]]
+    if unverified:
+        with st.expander("⚠️ Dates needing re-verification"):
+            for name in unverified:
+                st.caption(f"• {name}")
 
-    group_filter = st.multiselect("Group", options=GROUPS, default=GROUPS)
+filtered_events = [e for e in EVENTS if e["group"] in group_filter]
+filtered_events.sort(key=lambda e: e["start"])
 
-    available_categories = [c for c, cfg in SEARCH_QUERIES.items() if cfg["group"] in group_filter]
-    selected_categories = st.multiselect(
-        "Categories", options=available_categories, default=available_categories
+# --- Status grid: one glance per group ---
+st.subheader("Status at a glance")
+cols = st.columns(len(group_filter)) if group_filter else []
+for col, group in zip(cols, group_filter):
+    group_events = [e for e in filtered_events if e["group"] == group]
+    active = [e for e in group_events if get_status(e, today)[0] == "active"]
+    upcoming = sorted(
+        [e for e in group_events if get_status(e, today)[0] == "upcoming"],
+        key=lambda e: e["start"],
     )
-
-    impact_filter = st.multiselect("Impact level", options=["High", "Medium", "Low"],
-                                    default=["High", "Medium", "Low"])
-
-    keyword_filter = st.text_input("Keyword search (optional)")
-
-    st.divider()
-    if st.button("🔄 Refresh all feeds"):
-        st.cache_data.clear()
-        st.rerun()
-
-    st.divider()
-    with st.expander("ℹ️ About the Corporate Leads tab"):
-        st.caption(
-            "Google News rarely covers private RFP/tender activity for travel management "
-            "vendors — that mostly lives on government tender portals (GeM), LinkedIn, and "
-            "trade press (ET TravelWorld, TravelBizMonitor). This tab catches published "
-            "'appoints/onboards' announcements, but treat a thin result as expected, not broken."
-        )
+    with col:
+        st.markdown(f"**{group}**")
+        if active:
+            for e in active:
+                _, days_left = get_status(e, today)
+                st.success(f"🟢 {e['name']}\n\n{days_left}d left")
+        elif upcoming:
+            nxt = upcoming[0]
+            _, days_until = get_status(nxt, today)
+            st.warning(f"🟡 Next: {nxt['name']}\n\nin {days_until}d")
+        else:
+            st.info("⚪ Quiet")
 
 st.divider()
 
-with st.spinner("Fetching destination, lead, and competitor signals..."):
-    articles, fetch_errors = get_all_news(lookback_days)
-
-if fetch_errors:
-    with st.expander(f"⚠️ {len(fetch_errors)} feed notice(s) — click to view", expanded=False):
-        for err in fetch_errors:
-            st.caption(err)
-
-filtered = [
-    a for a in articles
-    if a["group"] in group_filter
-    and a["category"] in selected_categories
-    and a["impact"] in impact_filter
-    and (keyword_filter.lower() in (a["title"] + a["summary"]).lower() if keyword_filter else True)
-]
-
-destination_signals = [a for a in filtered if a["group"] == "Destination Watch"]
-lead_signals = [a for a in filtered if a["group"] == "Corporate Travel Leads"]
-competitor_signals = [a for a in filtered if a["group"] == "Competitor Intel"]
-trust_signals = [a for a in filtered if a["group"] == "Trust & Sentiment"]
-regulatory_signals = [a for a in filtered if a["group"] == "Regulatory & Ops"]
-
-# --- Top metrics ---
-col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-col_m1.metric("📍 Destination", len(destination_signals))
-col_m2.metric("💼 Leads", len(lead_signals))
-col_m3.metric("🎯 Competitor", len(competitor_signals))
-col_m4.metric("🛡️ Trust/Sentiment", len(trust_signals))
-col_m5.metric("🔴 High impact", sum(1 for a in filtered if a["impact"] == "High"))
+# --- Timeline ---
+st.subheader("Timeline")
+if filtered_events:
+    html, height = build_timeline_html(filtered_events, today, window_days)
+    components.html(html, height=height, scrolling=False)
+else:
+    st.info("No events for the selected groups.")
 
 st.divider()
 
-tab_overview, tab_dest, tab_leads, tab_comp, tab_trust, tab_ops = st.tabs(
-    ["🔎 Overview", "📍 Destination Watch", "💼 Corporate Leads",
-     "🎯 Competitor Intel", "🛡️ Trust & Sentiment", "🏛️ Regulatory & Ops"]
-)
-
-with tab_overview:
-    st.subheader("💼 Fresh leads")
-    render_article_list(lead_signals[:5])
-
-    st.subheader("🎯 Competitor moves")
-    render_article_list(competitor_signals[:5])
-
-    st.subheader("📍 Destination signals")
-    render_article_list(destination_signals[:5])
-
-    st.subheader("📊 Signal mix")
-    if filtered:
-        df_counts = (
-            pd.DataFrame(filtered)["category"]
-            .value_counts()
-            .rename_axis("Category")
-            .reset_index(name="Articles")
-        )
-        st.dataframe(df_counts, hide_index=True, use_container_width=True)
-
-with tab_dest:
-    render_article_list(destination_signals)
-
-with tab_leads:
-    render_article_list(lead_signals)
-
-with tab_comp:
-    render_article_list(competitor_signals)
-
-with tab_trust:
-    render_article_list(trust_signals)
-
-with tab_ops:
-    render_article_list(regulatory_signals)
-
-    if filtered:
-        export_df = pd.DataFrame(filtered)[
-            ["published_dt", "group", "category", "signal", "impact", "source", "title", "link"]
-        ]
-        csv = export_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "📥 Download all filtered results as CSV",
-            data=csv,
-            file_name=f"gozo_intel_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-        )
-
-st.divider()
-st.caption(f"Last synchronized: {datetime.now().strftime('%Y-%m-%d %H:%M')} · Data via Google News RSS")
+# --- Detail list ---
+st.subheader("Details")
+for ev in filtered_events:
+    status, value = get_status(ev, today)
+    with st.container():
+        st.markdown(f"**{ev['name']}**  ·  🏷️ {ev['group']}  ·  {status_badge(status, value)}")
+        st.caption(f"{ev['start'].strftime('%d %b %Y')} – {ev['end'].strftime('%d %b %Y')}")
+        st.write(ev["why"])
+        if not ev["verified"]:
+            st.caption("⚠️ Approximate date — confirm closer to the event.")
+        st.divider()
